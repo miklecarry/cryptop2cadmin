@@ -1,0 +1,13 @@
+version: "3.8"
+services:
+  beegoapp:
+    build: .
+    container_name: beegoapp
+    ports:
+      - "8080:8080"
+    volumes:         
+      - beego_data:/app/data  # Для хранения БД
+    restart: always
+
+volumes:
+  beego_data:
