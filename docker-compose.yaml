@@ -9,7 +9,6 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - .:/app
       - beego_data:/app/data
     restart: always
 
