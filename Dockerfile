@@ -2,17 +2,18 @@ FROM golang:1.24.4-alpine AS base
 
 RUN apk add --no-cache build-base gcc musl-dev sqlite-dev git
 
-WORKDIR /app
+
 RUN go install github.com/beego/bee/v2@latest
 
 
 FROM base AS dev
+WORKDIR /app
 COPY . .
 
 
 ENV CGO_ENABLED=1
 
-RUN go mod tidy && go build .
+RUN go mod tidy && go build -o hostmanager .
 
 EXPOSE 8080
 
