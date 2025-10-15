@@ -12,8 +12,8 @@ COPY . .
 
 ENV CGO_ENABLED=1
 
-RUN go mod tidy
+RUN go mod tidy && go build .
 
 EXPOSE 8080
 
-CMD ["bee", "run"]
+CMD ["./hostmanager"]
