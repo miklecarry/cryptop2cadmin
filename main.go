@@ -9,6 +9,7 @@ import (
 )
 
 func main() {
+	go services.InitTelegramBot()
 	database.InitDB()
 	services.StartStateCleanup() // ← добавить
 	web.Run()

@@ -8,11 +8,13 @@ import (
 )
 
 type User struct {
-	Id       int    `orm:"auto"`
-	FullName string `orm:"size(100)"`
-	Username string `orm:"unique"`
-	Password string `orm:"size(100)"`
-	Role     string `orm:"size(20)"` // "superadmin", "admin", "user"
+	Id             int    `orm:"auto"`
+	FullName       string `orm:"size(100)"`
+	Username       string `orm:"unique"`
+	Password       string `orm:"size(100)"`
+	Role           string `orm:"size(20)"` // "superadmin", "admin", "user"
+	TelegramChatID int64  `orm:"null;index"`
+	WebAppToken    string `orm:"size(64);null;unique"` // токен для входа
 }
 
 func init() {

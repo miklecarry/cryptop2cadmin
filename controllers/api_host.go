@@ -2,6 +2,10 @@ package controllers
 
 import (
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"time"
+
 	"hostmanager/models"
 	"hostmanager/services"
 
@@ -21,61 +25,210 @@ type HostStateRequest struct {
 	MaxLimit int    `json:"max_limit,omitempty"`
 }
 
-func (c *APIHostController) Post() {
-	c.Ctx.Input.CopyBody(1 << 20)
-	//rawBody := c.Ctx.Input.RequestBody
-	//rawBody = utils.RemoveBOM(rawBody) // ← удаляем BOM
+type remoteConfigResponse struct {
+	Active      bool      `json:"active"`
+	SocketURL   string    `json:"socket"`
+	AccessToken string    `json:"access_token"`
+	MinAmount   int       `json:"min"`
+	MaxAmount   int       `json:"max"`
+	StopTime    time.Time `json:"stop_time"`
+	IPAddr      string    `json:"ip_addr"`
+	Logger      string    `json:"logger"`
+}
 
-	if len(c.Ctx.Input.RequestBody) == 0 {
-		c.Data["json"] = map[string]interface{}{"status": "empty_body", "timeout": 0}
+func (c *APIHostController) Get() {
+	username, password, ok := c.Ctx.Request.BasicAuth()
+	if !ok {
+		c.Ctx.Output.SetStatus(http.StatusUnauthorized)
+		c.Data["json"] = map[string]interface{}{"status": "unauthorized"}
 		c.ServeJSON()
 		return
 	}
-	var hreq HostStateRequest
-	if err := json.Unmarshal(c.Ctx.Input.RequestBody, &hreq); err != nil || hreq.Name == "" {
-		c.Data["json"] = map[string]interface{}{"status": err.Error(), "timeout": 0}
-		c.ServeJSON()
-		return
-	}
-
-	// Обновляем состояние в памяти по NAME
-	services.UpdateHostState(hreq.Name, hreq.Enabled)
 
 	o := orm.NewOrm()
-	host := models.Host{Name: hreq.Name}
-	err := o.Read(&host, "Name") // ← читаем по Name
-
+	// Найдём пользователя по username
+	user := models.User{Username: username}
+	err := o.Read(&user, "Username")
 	if err == orm.ErrNoRows {
-		host.Name = hreq.Name
-		host.Ip = hreq.Ip
-		host.MinLimit = hreq.MinLimit
-		host.MaxLimit = hreq.MaxLimit
-		_, err = o.Insert(&host)
-		if err != nil {
-			c.Data["json"] = map[string]interface{}{"status": "error_insert", "timeout": 0}
-			c.ServeJSON()
-			return
-		}
-	} else {
-		// Обновляем IP и лимиты (IP может меняться!)
-		updated := false
-		if hreq.Ip != "" && hreq.Ip != host.Ip {
-			host.Ip = hreq.Ip
-			updated = true
-		}
-		if hreq.MinLimit != host.MinLimit {
-			host.MinLimit = hreq.MinLimit
-			updated = true
-		}
-		if hreq.MaxLimit != host.MaxLimit {
-			host.MaxLimit = hreq.MaxLimit
-			updated = true
-		}
-		if updated {
-			o.Update(&host, "Ip", "MinLimit", "MaxLimit")
-		}
+		c.Ctx.Output.SetStatus(http.StatusUnauthorized)
+		c.Data["json"] = map[string]interface{}{"status": "unauthorized"}
+		c.ServeJSON()
+		return
+	} else if err != nil {
+		c.Ctx.Output.SetStatus(http.StatusInternalServerError)
+		c.Data["json"] = map[string]interface{}{"status": "error", "error": err.Error()}
+		c.ServeJSON()
+		return
 	}
 
-	c.Data["json"] = map[string]interface{}{"status": "ok", "timeout": 0}
+	if user.Password != models.HashPassword(password) {
+		c.Ctx.Output.SetStatus(http.StatusUnauthorized)
+		c.Data["json"] = map[string]interface{}{"status": "unauthorized"}
+		c.ServeJSON()
+		return
+	}
+
+	var host models.Host
+	qs := o.QueryTable(new(models.Host))
+	err = qs.Filter("User__Id", user.Id).One(&host)
+	if err == orm.ErrNoRows {
+		c.Ctx.Output.SetStatus(http.StatusNotFound)
+		c.Data["json"] = map[string]interface{}{"status": "no_host", "timeout": 0}
+		c.ServeJSON()
+		return
+	} else if err != nil {
+		c.Ctx.Output.SetStatus(http.StatusInternalServerError)
+		c.Data["json"] = map[string]interface{}{"status": "error", "error": err.Error()}
+		c.ServeJSON()
+		return
+	}
+
+	resp := remoteConfigResponse{
+		Active:      host.Active,
+		SocketURL:   host.SocketURL,
+		AccessToken: host.AccessToken,
+		MinAmount:   host.MinLimit,
+		MaxAmount:   host.MaxLimit,
+		StopTime:    host.StopTime,
+		IPAddr:      host.ServerAddr,
+	}
+
+	c.Data["json"] = resp
+	c.ServeJSON()
+}
+func (c *APIHostController) GetPaymentMethods() {
+	id := c.Ctx.Input.Param(":id")
+
+	o := orm.NewOrm()
+
+	var host models.Host
+	err := o.QueryTable("host").Filter("Id", id).One(&host)
+	if err != nil {
+		c.Data["json"] = map[string]interface{}{"status": "no host with id"}
+		c.ServeJSON()
+		return
+	}
+
+	// Запрос к app.cr.bot
+	client := &http.Client{Timeout: 5 * time.Second}
+	req, _ := http.NewRequest("GET", "https://app.cr.bot/internal/v1/p2c/accounts", nil)
+	req.Header.Set("Cookie", "access_token="+host.AccessToken)
+
+	resp, err := client.Do(req)
+	if err != nil || resp.StatusCode != 200 {
+		fmt.Print(resp.StatusCode)
+		c.Data["json"] = map[string]interface{}{"error": "Не удалось получить методы оплаты"}
+		c.ServeJSON()
+		return
+	}
+	defer resp.Body.Close()
+
+	var result map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&result)
+
+	c.Data["json"] = result
+	c.ServeJSON()
+}
+
+func (c *APIHostController) SelectPaymentMethod() {
+	id := c.Ctx.Input.Param(":id")
+	methodID := c.GetString("method_id")
+
+	o := orm.NewOrm()
+	var host models.Host
+	err := o.QueryTable("host").Filter("Id", id).One(&host)
+	if err != nil {
+		c.Abort("404")
+		return
+	}
+
+	host.PaymentMethodID = methodID
+	host.WorkerRunning = true
+	o.Update(&host, "PaymentMethodID", "WorkerRunning")
+
+	// Запуск воркера (если ещё не запущен)
+	services.StartDealWorker(host)
+
+	c.Data["json"] = map[string]string{"status": "ok"}
+	c.ServeJSON()
+
+	// Лог
+	log := models.HostLog{
+		Host:    &host,
+		Level:   "info",
+		Message: fmt.Sprintf("Бот стартанул с id метода %s", methodID),
+	}
+	o.Insert(&log)
+}
+func (c *APIHostController) StartMonitoring() {
+	id := c.Ctx.Input.Param(":id")
+	methodID := c.GetString("method_id")
+
+	if methodID == "" {
+		c.Data["json"] = map[string]string{"error": "method_id обязателен"}
+		c.ServeJSON()
+		return
+	}
+
+	o := orm.NewOrm()
+	var host models.Host
+	err := o.QueryTable("host").Filter("Id", id).One(&host)
+	if err != nil {
+		c.Abort("404")
+		return
+	}
+
+	// Проверяем, что AccessToken задан
+	if host.AccessToken == "" {
+		c.Data["json"] = map[string]string{"error": "Access Token не задан"}
+		c.ServeJSON()
+		return
+	}
+
+	// Пробуем получить методы (валидация токена)
+	client := &http.Client{Timeout: 5 * time.Second}
+	req, _ := http.NewRequest("GET", "https://app.cr.bot/internal/v1/p2c/accounts", nil)
+	req.Header.Set("Cookie", "access_token="+host.AccessToken)
+	resp, err := client.Do(req)
+	if err != nil || resp.StatusCode != 200 {
+		c.Data["json"] = map[string]string{"error": "Неверный Access Token"}
+		c.ServeJSON()
+		return
+	}
+	resp.Body.Close()
+
+	// Сохраняем
+	host.Active = true
+	host.PaymentMethodID = methodID
+	host.WorkerRunning = true
+	o.Update(&host, "Active", "PaymentMethodID", "WorkerRunning")
+
+	// Запускаем воркер
+	services.StartDealWorker(host)
+
+	// Лог
+	log := models.HostLog{
+		Host:    &host,
+		Level:   "info",
+		Message: fmt.Sprintf("Бот стартанул с id метода %s", methodID),
+	}
+	o.Insert(&log)
+
+	c.Data["json"] = map[string]string{"status": "ok"}
+	c.ServeJSON()
+}
+func (c *APIHostController) StopMonitoring() {
+	id := c.Ctx.Input.Param(":id")
+	o := orm.NewOrm()
+	var host models.Host
+	o.QueryTable("host").Filter("Id", id).One(&host)
+
+	host.Active = false
+	host.WorkerRunning = false
+	o.Update(&host, "Active", "WorkerRunning")
+
+	services.StopDealWorker(host.Id)
+
+	c.Data["json"] = map[string]string{"status": "ok"}
 	c.ServeJSON()
 }

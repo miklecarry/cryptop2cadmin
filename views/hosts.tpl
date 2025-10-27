@@ -4,6 +4,7 @@
     <a href="/users" class="btn btn-primary">Пользователи</a>
     {{end}}
 </div>
+
 <meta http-equiv="refresh" content="15">
 {{if .Hosts}}
 <div class="row">
@@ -14,21 +15,30 @@
             <div class="card-body">
                 <h5 class="card-title">
                     {{.Host.Name}}
-                    {{if not .Online}}
-                        <span class="badge bg-secondary">Offline</span>
-                    {{else if .Enabled}}
-                        <span class="badge bg-success">Online</span>
+                    {{if not .Host.Active}}
+                        <span class="badge bg-secondary">Неaктивен</span>
                     {{else}}
-                        <span class="badge bg-warning text-dark">Disabled</span>
+                        <span class="badge bg-success">Aктивен</span>
+
+
                     {{end}}
                 </h5>
-                <p class="card-text text-muted small">
-                    IP: {{.Host.Ip}}<br>
-                    Лимиты: {{.Host.MinLimit}} – {{.Host.MaxLimit}}
-                </p>
-                {{if or (eq $.Role "admin") (eq $.Role "superadmin")}}
-                    <a href="/host/{{.Host.Id}}" class="btn btn-sm btn-outline-primary">Настройки</a>
-                    {{end}}
+<p class="card-text text-muted small">
+
+    Лимиты: {{.Host.MinLimit}} – {{.Host.MaxLimit}}<br>
+
+</p>
+{{if or 
+    (eq $.Role "admin") 
+    (eq $.Role "superadmin") 
+    (and 
+        (eq $.Role "user") 
+        .Host.User 
+        (eq .Host.User.Id $.CurrentUserID)
+    )
+}}
+    <a href="/host/{{.Host.Id}}" class="btn btn-sm btn-outline-primary">Настройки</a>
+{{end}}
             </div>
         </div>
     </div>
@@ -39,3 +49,10 @@
     Пока нет добавленных хостов 🚀
 </div>
 {{end}}
+<div class="d-flex justify-content-between align-items-center mb-3">
+
+    {{if or (eq .Role "admin") (eq .Role "superadmin")}}
+        <a href="/host/create" class="btn btn-success">➕ Добавить хост</a>
+    {{end}}
+
+</div>

@@ -25,7 +25,6 @@ func (c *UserController) Get() {
 	o := orm.NewOrm()
 	var users []models.User
 	o.QueryTable(new(models.User)).All(&users)
-
 	c.Data["Users"] = users
 	c.Layout = "layout.tpl"
 	c.TplName = "users.tpl"

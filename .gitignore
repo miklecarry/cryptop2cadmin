@@ -33,3 +33,5 @@ go.work.sum
 go.sum
 data.db
 tmp/*
+data
+data/*

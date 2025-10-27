@@ -1,16 +1,37 @@
 version: "3.8"
+
 services:
   beegoapp:
-    image: beego-dev:latest    
     build:
       context: .
-      target: dev
+      target: prod   # production target из Dockerfile
     container_name: beegoapp
-    ports:
-      - "8080:8080"
-    volumes:
-      - beego_data:/app/data
+    env_file:
+      - .env        # все переменные окружения из .env
     restart: always
+    networks:
+      - web
+    labels:
+      - "traefik.enable=false"  # если используешь caddy без traefik
+
+  caddy:
+    image: caddy:2
+    container_name: caddy
+    restart: always
+    ports:
+      - "443:443"
+      - "80:80"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - web
 
 volumes:
-  beego_data:
+  caddy_data:
+  caddy_config:
+
+networks:
+  web:
+    driver: bridge

@@ -48,3 +48,31 @@ func (c *AuthController) Logout() {
 	c.DestroySession()
 	c.Redirect("/login", 302)
 }
+
+func (c *AuthController) TelegramLogin() {
+	token := c.GetString("token")
+	if token == "" {
+		c.Redirect("/login", 302)
+		return
+	}
+
+	o := orm.NewOrm()
+	var user models.User
+	err := o.QueryTable("user").Filter("WebAppToken", token).One(&user)
+	if err != nil {
+		c.Data["Error"] = "Ссылка недействительна"
+		c.TplName = "login.tpl"
+		return
+	}
+
+	// Авторизуем
+	c.SetSession("user_id", user.Id)
+	c.SetSession("role", user.Role)
+	c.SetSession("username", user.Username)
+
+	// Опционально: обнулить токен (если одноразовый)
+	// user.WebAppToken = ""
+	// o.Update(&user, "WebAppToken")
+
+	c.Redirect("/", 302)
+}
