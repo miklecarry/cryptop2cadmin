@@ -1,0 +1,38 @@
+yourdomain.com {
+    # Авто HTTPS
+    encode gzip
+    log {
+        output file /var/log/caddy/access.log
+        format json
+    }
+
+    # Прокси к Beego-приложению
+    reverse_proxy beegoapp:8080 {
+        # Таймауты на long-polling или WebSocket
+        transport http {
+            read_buffer 8192
+            idle_timeout 60s
+        }
+    }
+
+    # WebSocket (для бота или других real-time endpoints)
+    @ws {
+        header Connection *Upgrade*
+        header Upgrade websocket
+    }
+    reverse_proxy @ws beegoapp:8080 {
+        transport http {
+            read_buffer 8192
+            idle_timeout 60s
+        }
+    }
+
+    # Безопасные заголовки
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "same-origin"
+        Cache-Control "no-store"
+    }
+}
