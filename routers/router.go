@@ -19,6 +19,7 @@ func init() {
 
 	// Аутентификация
 	web.Router("/login", &controllers.AuthController{})
+	web.Router("/login/telegram", &controllers.AuthController{}, "get:TelegramLogin")
 	web.Router("/logout", &controllers.AuthController{}, "get:Logout")
 	// API
 	web.Router("/api/host/:id/payment-methods", &controllers.APIHostController{}, "get:GetPaymentMethods")

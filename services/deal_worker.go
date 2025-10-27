@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"strconv"
 	"sync"
 	"time"
 
@@ -19,47 +18,44 @@ import (
 
 var (
 	workers   = make(map[int64]*DealWorker)
-	workersMu sync.RWMutex
+	workersMu sync.Mutex
 )
 
 type DealWorker struct {
-	Host           models.Host
-	LastCursor     string
-	ActiveDeals    map[int64]string // dealID → messageID
-	ProcessedDeals sync.Map         // dealID → timestamp (для отслеживания уже обработанных)
-	cancel         context.CancelFunc
-	processingMu   sync.Mutex // Блокировка для обработки сделок
+	Host        models.Host
+	LastCursor  string
+	ActiveDeals map[int64]int      // dealID → messageID (int) — changed from string
+	seen        map[int64]struct{} // локальный набор уже отправленных сделок
+	mu          sync.Mutex         // защита для полей воркера
+	cancel      context.CancelFunc
 }
 
 func StartDealWorker(host models.Host) {
 	workersMu.Lock()
 	defer workersMu.Unlock()
 
-	// Останавливаем старый воркер если существует
-	if oldWorker, exists := workers[host.Id]; exists {
-		oldWorker.stop()
-		delete(workers, host.Id)
+	if _, exists := workers[host.Id]; exists {
+		return
 	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 	w := &DealWorker{
 		Host:        host,
-		ActiveDeals: make(map[int64]string),
+		ActiveDeals: make(map[int64]int),
+		seen:        make(map[int64]struct{}),
 		cancel:      cancel,
 	}
 	workers[host.Id] = w
 
-	// Очистка сообщений
+	// Очистка сообщений (делаем это потокобезопасно)
 	if host.User != nil && host.User.TelegramChatID != 0 {
-		ClearUserMessages(host.User.TelegramChatID, w)
+		w.ClearUserMessages(host.User.TelegramChatID)
 	}
 
 	go w.run(ctx)
-	log.Printf("Воркер для хоста %d запущен", host.Id)
 }
 
 func (w *DealWorker) run(ctx context.Context) {
-	ticker := time.NewTicker(3 * time.Second) // Увеличил интервал для снижения нагрузки
+	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
 	for {
@@ -72,13 +68,9 @@ func (w *DealWorker) run(ctx context.Context) {
 		}
 	}
 }
-
 func (w *DealWorker) stop() {
-	if w.cancel != nil {
-		w.cancel()
-	}
+	w.cancel()
 }
-
 func StopDealWorker(hostID int64) {
 	workersMu.Lock()
 	defer workersMu.Unlock()
@@ -91,31 +83,28 @@ func StopDealWorker(hostID int64) {
 }
 
 func (w *DealWorker) checkDeals() {
-	w.processingMu.Lock()
-	defer w.processingMu.Unlock()
-
-	url := "https://app.cr.bot/internal/v1/p2c/payments?size=20&status=processing" // Уменьшил размер
+	// Формируем URL; если LastCursor установлен — добавляем
+	w.mu.Lock()
+	url := "https://app.cr.bot/internal/v1/p2c/payments?size=40&status=processing"
 	if w.LastCursor != "" {
 		url += "&cursor=" + w.LastCursor
 	}
+	accessToken := w.Host.AccessToken
+	w.mu.Unlock()
 
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		log.Printf("Ошибка создания запроса: %v", err)
-		return
-	}
-	req.Header.Set("Cookie", "access_token="+w.Host.AccessToken)
+	req, _ := http.NewRequest("GET", url, nil)
+	req.Header.Set("Cookie", "access_token="+accessToken)
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Printf("Ошибка запроса для хоста %d: %v", w.Host.Id, err)
+		log.Printf("checkDeals: http error: %v", err)
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		log.Printf("Неверный статус код для хоста %d: %d", w.Host.Id, resp.StatusCode)
+		log.Printf("checkDeals: status %d", resp.StatusCode)
 		return
 	}
 
@@ -123,136 +112,123 @@ func (w *DealWorker) checkDeals() {
 		Data   []DealPreview `json:"data"`
 		Cursor string        `json:"cursor"`
 	}
-
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		log.Printf("Ошибка декодирования JSON для хоста %d: %v", w.Host.Id, err)
+		log.Printf("checkDeals: decode error: %v", err)
 		return
 	}
 
-	// Обновляем курсор только при успешном получении данных
+	// Обновляем курсор потокобезопасно
+	w.mu.Lock()
+	// Если API возвращает курсор — обновляем. Дополнительно можно проверить, не пустой ли он.
 	if result.Cursor != "" {
 		w.LastCursor = result.Cursor
 	}
+	w.mu.Unlock()
 
-	// Загружаем данные пользователя
 	o := orm.NewOrm()
-	if err := o.Read(&w.Host); err != nil {
-		log.Printf("Ошибка чтения хоста %d: %v", w.Host.Id, err)
+	o.LoadRelated(&w.Host, "User")
+	if w.Host.User == nil || w.Host.User.TelegramChatID == 0 {
 		return
 	}
-
-	if w.Host.User == nil {
-		if err := o.LoadRelated(&w.Host, "User"); err != nil || w.Host.User == nil {
-			log.Printf("Пользователь не найден для хоста %d", w.Host.Id)
-			return
-		}
-	}
-
-	if w.Host.User.TelegramChatID == 0 {
-		log.Printf("TelegramChatID не установлен для пользователя хоста %d", w.Host.Id)
-		return
-	}
-
 	chatID := w.Host.User.TelegramChatID
 
-	// Собираем текущие активные сделки
-	currentDealIDs := make(map[int64]bool)
-	for _, deal := range result.Data {
-		currentDealIDs[deal.ID] = true
+	currentIDs := make(map[int64]struct{})
+	for _, d := range result.Data {
+		currentIDs[d.ID] = struct{}{}
 	}
 
-	// Удаляем завершенные сделки
-	for dealID, msgID := range w.ActiveDeals {
-		if !currentDealIDs[dealID] {
-			// Сделка завершена - удаляем сообщение
-			if err := w.deleteTelegramMessage(chatID, msgID); err == nil {
-				delete(w.ActiveDeals, dealID)
-				w.ProcessedDeals.Delete(dealID)
-				log.Printf("Удалена завершенная сделка %d для хоста %d", dealID, w.Host.Id)
+	// 1️⃣ Удаляем оплаченные (те, которые в ActiveDeals больше не возвращаются)
+	w.mu.Lock()
+	for id, msgID := range w.ActiveDeals {
+		if _, stillActive := currentIDs[id]; !stillActive {
+			// сделка пропала — удалить из Telegram
+			msg := tgbotapi.NewDeleteMessage(chatID, msgID)
+			if _, err := Bot.Send(msg); err != nil {
+				log.Printf("Clear Telegram message %d failed: %v", msgID, err)
 			}
+			delete(w.ActiveDeals, id)
+			delete(w.seen, id) // можно забыть из seen, чтобы при новой идентичной сделке можно было заново отправить
 		}
 	}
+	w.mu.Unlock()
 
-	// Обрабатываем новые сделки
+	// 2️⃣ Добавляем новые
 	for _, deal := range result.Data {
-		// Проверяем, не обрабатывали ли мы уже эту сделку
-		if _, processed := w.ProcessedDeals.Load(deal.ID); processed {
+		w.mu.Lock()
+		if _, exists := w.ActiveDeals[deal.ID]; exists {
+			w.mu.Unlock()
+			continue // уже отображается
+		}
+		if _, wasSeen := w.seen[deal.ID]; wasSeen {
+			// уже однажды отправляли, пропускаем (защита от дубликатов API)
+			w.mu.Unlock()
 			continue
 		}
+		w.mu.Unlock()
 
-		// Проверяем, не активна ли уже сделка
-		if _, isActive := w.ActiveDeals[deal.ID]; isActive {
-			continue
-		}
-
-		// Получаем детали сделки
 		details, err := w.getDealDetails(deal.ID)
 		if err != nil {
-			log.Printf("Ошибка получения деталей сделки %d: %v", deal.ID, err)
+			log.Printf("getDealDetails error for %d: %v", deal.ID, err)
 			continue
 		}
-
-		// Отправляем сообщение в Telegram
-		msgID, err := w.sendTelegramMessage(chatID, details)
-		if err != nil {
-			log.Printf("Ошибка отправки сообщения для сделки %d: %v", deal.ID, err)
-			continue
+		msgID := w.sendTelegramMessage(chatID, details)
+		if msgID != 0 {
+			w.mu.Lock()
+			w.ActiveDeals[deal.ID] = msgID
+			w.seen[deal.ID] = struct{}{}
+			w.mu.Unlock()
 		}
 
-		// Сохраняем информацию о сделке
-		w.ActiveDeals[deal.ID] = fmt.Sprintf("%d", msgID)
-		w.ProcessedDeals.Store(deal.ID, time.Now())
-
-		// Логируем в базу
 		hostLog := models.HostLog{
-			Host:  &models.Host{Id: w.Host.Id},
+			Host:  &w.Host,
 			Level: "bounty",
-			Message: fmt.Sprintf("https://app.cr.bot/p2c/orders/%d Сумма: %s %s Магазин: %s",
+			Message: fmt.Sprintf("https://app.cr.bot/p2c/orders/%d  Сумма: %s %s Магазин: %s",
 				details.ID, details.InAmount, details.InAsset, details.BrandName),
 		}
 		if _, err := o.Insert(&hostLog); err != nil {
-			log.Printf("Ошибка логирования сделки %d: %v", deal.ID, err)
+			log.Printf("HostLog insert error: %v", err)
 		}
-
-		log.Printf("Обработана новая сделка %d для хоста %d", deal.ID, w.Host.Id)
-
-		// Небольшая задержка между обработкой сделок
-		time.Sleep(100 * time.Millisecond)
 	}
-}
-
-func (w *DealWorker) deleteTelegramMessage(chatID int64, msgID string) error {
-	if Bot == nil {
-		return fmt.Errorf("бот не инициализирован")
-	}
-
-	msg := tgbotapi.NewDeleteMessage(chatID, toInt(msgID))
-	_, err := Bot.Send(msg)
-	return err
-}
-
-func toInt(s string) int {
-	i, _ := strconv.Atoi(s)
-	return i
 }
 
 func ClearUserMessages(chatID int64, w *DealWorker) {
-	for dealID, msgID := range w.ActiveDeals {
-		w.deleteTelegramMessage(chatID, msgID)
-		delete(w.ActiveDeals, dealID)
-		w.ProcessedDeals.Delete(dealID)
+	// Удобно иметь метод, но пусть он берёт w.mu
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, msgID := range w.ActiveDeals {
+		msg := tgbotapi.NewDeleteMessage(chatID, msgID)
+		if _, err := Bot.Send(msg); err != nil {
+			log.Printf("ClearUserMessages: failed to delete %d: %v", msgID, err)
+		}
 	}
+	w.ActiveDeals = make(map[int64]int)
+	w.seen = make(map[int64]struct{})
+}
+
+func (w *DealWorker) ClearUserMessages(chatID int64) {
+	// метод-обёртка: потокобезопасно
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, msgID := range w.ActiveDeals {
+		msg := tgbotapi.NewDeleteMessage(chatID, msgID)
+		if _, err := Bot.Send(msg); err != nil {
+			log.Printf("ClearUserMessages: failed to delete %d: %v", msgID, err)
+		}
+	}
+	w.ActiveDeals = make(map[int64]int)
+	w.seen = make(map[int64]struct{})
 }
 
 func (w *DealWorker) getDealDetails(dealID int64) (*DealDetails, error) {
 	url := fmt.Sprintf("https://app.cr.bot/internal/v1/p2c/payments/%d", dealID)
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Cookie", "access_token="+w.Host.AccessToken)
+	req, _ := http.NewRequest("GET", url, nil)
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	w.mu.Lock()
+	accessToken := w.Host.AccessToken
+	w.mu.Unlock()
+	req.Header.Set("Cookie", "access_token="+accessToken)
+
+	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -266,35 +242,29 @@ func (w *DealWorker) getDealDetails(dealID int64) (*DealDetails, error) {
 	var result struct {
 		Data DealDetails `json:"data"`
 	}
-
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, err
 	}
-
 	return &result.Data, nil
 }
 
-func (w *DealWorker) sendTelegramMessage(chatID int64, deal *DealDetails) (int, error) {
+func (w *DealWorker) sendTelegramMessage(chatID int64, deal *DealDetails) int {
 	if Bot == nil {
-		return 0, fmt.Errorf("бот не инициализирован")
+		return 0
 	}
 
-	// Генерация QR-кода (если нужно)
-	var photoMsgID int
+	// Генерация QR-кода (если не удалось — просто продолжим без фото)
+	var photoFile tgbotapi.FileBytes
 	png, err := qrcode.Encode(deal.Url, qrcode.Medium, 256)
 	if err == nil {
-		photo := tgbotapi.NewPhoto(chatID, tgbotapi.FileBytes{
+		photoFile = tgbotapi.FileBytes{
 			Name:  fmt.Sprintf("qr_%d.png", deal.ID),
 			Bytes: png,
-		})
-		sentPhoto, err := Bot.Send(photo)
-		if err == nil {
-			photoMsgID = sentPhoto.MessageID
 		}
 	}
 
-	// Основное сообщение
-	text := fmt.Sprintf(
+	// Текст для подписи (caption). Telegram captions ограничены — длину контролируйте сами.
+	caption := fmt.Sprintf(
 		"💳 <b>Новая сделка</b>\n"+
 			"https://app.cr.bot/p2c/orders/%d\n"+
 			"Сумма: %s %s\nМагазин: %s\n\n"+
@@ -307,30 +277,33 @@ func (w *DealWorker) sendTelegramMessage(chatID int64, deal *DealDetails) (int, 
 		tgbotapi.NewInlineKeyboardRow(btn),
 	)
 
-	msg := tgbotapi.NewMessage(chatID, text)
+	if len(photoFile.Bytes) > 0 {
+		photo := tgbotapi.NewPhoto(chatID, photoFile)
+		photo.Caption = caption
+		photo.ParseMode = "HTML"
+		photo.ReplyMarkup = keyboard
+		sent, err := Bot.Send(photo)
+		if err != nil {
+			log.Printf("sendTelegramMessage: send photo failed: %v", err)
+			return 0
+		}
+		return sent.MessageID
+	}
+
+	// Если фото не получилось — отправим обычное сообщение с кнопкой
+	msg := tgbotapi.NewMessage(chatID, caption)
 	msg.ReplyMarkup = keyboard
 	msg.ParseMode = "HTML"
 
 	sent, err := Bot.Send(msg)
 	if err != nil {
-		// Если основное сообщение не отправилось, удаляем фото (если было отправлено)
-		if photoMsgID != 0 {
-			w.deleteTelegramMessage(chatID, fmt.Sprintf("%d", photoMsgID))
-		}
-		return 0, err
+		log.Printf("sendTelegramMessage: send msg failed: %v", err)
+		return 0
 	}
-
-	return sent.MessageID, nil
+	return sent.MessageID
 }
 
-// Получить воркер по ID хоста (для отладки)
-func GetWorker(hostID int64) *DealWorker {
-	workersMu.RLock()
-	defer workersMu.RUnlock()
-	return workers[hostID]
-}
-
-// Структуры остаются без изменений
+// Структуры
 type DealPreview struct {
 	ID     int64  `json:"id"`
 	Asset  string `json:"asset"`

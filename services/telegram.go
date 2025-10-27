@@ -58,74 +58,112 @@ func startTelegramPolling() {
 	updates := Bot.GetUpdatesChan(u)
 
 	for update := range updates {
-		if update.Message == nil {
+		// Сначала обрабатываем callback'и (они приходят отдельно от Message)
+		if update.CallbackQuery != nil {
+			go handleCallbackQuery(update.CallbackQuery)
 			continue
 		}
 
-		handleMessage(update.Message)
-		if update.CallbackQuery != nil {
-			handleCallbackQuery(update.CallbackQuery)
+		// Затем обычные сообщения
+		if update.Message != nil {
+			go handleMessage(update.Message)
 		}
 	}
 }
+
 func handleCallbackQuery(callback *tgbotapi.CallbackQuery) {
-	if strings.HasPrefix(callback.Data, "complete_") {
-		parts := strings.Split(callback.Data, "_")
+	if callback == nil {
+		return
+	}
+
+	// Сразу ответим на callback, чтобы убрать "часики"
+	answer := tgbotapi.NewCallback(callback.ID, "Принято")
+	if _, err := Bot.Request(answer); err != nil {
+		log.Printf("AnswerCallbackQuery error: %v", err)
+		// дальше всё равно попробуем обработать
+	}
+
+	data := callback.Data
+	if strings.HasPrefix(data, "complete_") {
+		parts := strings.Split(data, "_")
 		if len(parts) == 3 {
 			hostID, _ := strconv.ParseInt(parts[1], 10, 64)
 			dealID, _ := strconv.ParseInt(parts[2], 10, 64)
 
-			// Удаляем кнопку сразу
+			// Удаляем клавиатуру (заменяем на пустую)
 			edit := tgbotapi.NewEditMessageReplyMarkup(
 				callback.Message.Chat.ID,
 				callback.Message.MessageID,
 				tgbotapi.InlineKeyboardMarkup{InlineKeyboard: [][]tgbotapi.InlineKeyboardButton{}},
 			)
-			Bot.Send(edit)
+			if _, err := Bot.Send(edit); err != nil {
+				log.Printf("EditMessageReplyMarkup error: %v", err)
+			}
 
+			// Выполняем подтверждение платежа асинхронно
 			go completePayment(hostID, dealID, callback.Message.Chat.ID)
 		}
 	}
 }
 
 func handleMessage(msg *tgbotapi.Message) {
+	if msg == nil {
+		return
+	}
 	chatID := msg.Chat.ID
 	text := strings.TrimSpace(msg.Text)
 
-	mu.Lock()
-	defer mu.Unlock()
-
+	// Обработка команды /start — делаем под мьютексом коротко
 	if text == "/start" {
+		mu.Lock()
 		authStates[chatID] = &AuthState{Step: "awaiting_login"}
+		mu.Unlock()
 		sendMessage(chatID, "Введите ваш логин:")
 		return
 	}
 
-	state, exists := authStates[chatID]
-	if !exists {
-		sendMessage(chatID, "Напишите /start для входа.")
-		return
-	}
+	// Если пользователь отправил текст вида "complete_<host>_<deal>" вручную — тоже поддержим
 	if strings.HasPrefix(text, "complete_") {
 		parts := strings.Split(text, "_")
 		if len(parts) == 3 {
 			hostID, _ := strconv.ParseInt(parts[1], 10, 64)
 			dealID, _ := strconv.ParseInt(parts[2], 10, 64)
 			go completePayment(hostID, dealID, chatID)
+			return
 		}
 	}
+
+	// Получаем состояние под мьютексом (но не держим мьютекс во время DB операций)
+	mu.Lock()
+	state, exists := authStates[chatID]
+	mu.Unlock()
+
+	if !exists {
+		sendMessage(chatID, "Напишите /start для входа.")
+		return
+	}
+
 	switch state.Step {
 	case "awaiting_login":
+		// Сохраняем логин (под мьютексом коротко)
+		mu.Lock()
 		state.Login = text
 		state.Step = "awaiting_password"
+		authStates[chatID] = state
+		mu.Unlock()
 		sendMessage(chatID, "Введите ваш пароль:")
 
 	case "awaiting_password":
+		// Снимаем состояние под мьютексом, чтобы не блокировать других
+		mu.Lock()
 		login := state.Login
-		password := text
-		delete(authStates, chatID) // очищаем состояние
+		// удаляем состояние до проверки, чтобы избежать дублей
+		delete(authStates, chatID)
+		mu.Unlock()
 
-		// Проверяем учётные данные
+		password := text
+
+		// Проверка учётных данных — это IO, делаем без глобального мьютекса
 		o := orm.NewOrm()
 		var user models.User
 		err := o.QueryTable("user").Filter("Username", login).One(&user)
@@ -137,7 +175,9 @@ func handleMessage(msg *tgbotapi.Message) {
 		// Обновляем пользователя: привязываем chat_id и генерируем токен
 		user.TelegramChatID = chatID
 		user.WebAppToken = utils.GenerateToken()
-		o.Update(&user, "TelegramChatID", "WebAppToken")
+		if _, err := o.Update(&user, "TelegramChatID", "WebAppToken"); err != nil {
+			log.Printf("Update user error: %v", err)
+		}
 
 		// Формируем Web App URL
 		webAppURL := os.Getenv("WEB_APP_URL") + "/login/telegram?token=" + user.WebAppToken
@@ -150,21 +190,30 @@ func handleMessage(msg *tgbotapi.Message) {
 
 		msg := tgbotapi.NewMessage(chatID, "Авторизация успешна!")
 		msg.ReplyMarkup = keyboard
-		sentMsg, _ := Bot.Send(msg)
-		pin := tgbotapi.PinChatMessageConfig{
-			ChatID:              chatID,
-			MessageID:           sentMsg.MessageID,
-			DisableNotification: true, // без уведомления
+		if sentMsg, err := Bot.Send(msg); err == nil {
+			// Пинning сообщения — это отдельный Request
+			pin := tgbotapi.PinChatMessageConfig{
+				ChatID:              chatID,
+				MessageID:           sentMsg.MessageID,
+				DisableNotification: true,
+			}
+			if _, err := Bot.Request(pin); err != nil {
+				log.Printf("PinChatMessage error: %v", err)
+			}
+		} else {
+			log.Printf("Send auth success message error: %v", err)
 		}
-		Bot.Request(pin)
-
+	default:
+		sendMessage(chatID, "Неизвестный шаг авторизации. Напишите /start чтобы начать заново.")
 	}
 }
+
 func completePayment(hostID, dealID int64, chatID int64) {
 	o := orm.NewOrm()
 	var host models.Host
-	err := o.QueryTable("host").Filter("Id", hostID).One(&host)
-	if err != nil {
+	if err := o.QueryTable("host").Filter("Id", hostID).One(&host); err != nil {
+		log.Printf("completePayment: host not found %d: %v", hostID, err)
+		sendMessage(chatID, "❌ Воркер хоста не найден.")
 		return
 	}
 
@@ -173,15 +222,33 @@ func completePayment(hostID, dealID int64, chatID int64) {
 	req.Header.Set("Cookie", "access_token="+host.AccessToken)
 
 	client := &http.Client{Timeout: 5 * time.Second}
-	resp, _ := client.Do(req)
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("completePayment: http error: %v", err)
+		sendMessage(chatID, "❌ Ошибка при подтверждении сделки.")
+		return
+	}
 	if resp != nil {
 		resp.Body.Close()
+		if resp.StatusCode != 200 && resp.StatusCode != 204 {
+			log.Printf("completePayment: unexpected status %d", resp.StatusCode)
+			// можно распарсить тело и показать пользователю причину
+			sendMessage(chatID, "❌ Ошибка от сервера при подтверждении сделки.")
+			return
+		}
 	}
 
 	// Отправить подтверждение
 	sendMessage(chatID, "✅ Сделка подтверждена!")
 }
+
 func sendMessage(chatID int64, text string) {
+	if Bot == nil {
+		log.Printf("Bot is nil, can't send message to %d: %s", chatID, text)
+		return
+	}
 	msg := tgbotapi.NewMessage(chatID, text)
-	Bot.Send(msg)
+	if _, err := Bot.Send(msg); err != nil {
+		log.Printf("sendMessage error to %d: %v", chatID, err)
+	}
 }
