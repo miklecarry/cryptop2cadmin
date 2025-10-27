@@ -13,8 +13,8 @@ type User struct {
 	Username       string `orm:"unique"`
 	Password       string `orm:"size(100)"`
 	Role           string `orm:"size(20)"` // "superadmin", "admin", "user"
-	TelegramChatID int64  `orm:"null;index"`
-	WebAppToken    string `orm:"size(64);null;unique"` // токен для входа
+	TelegramChatID int64  `orm:"index"`
+	WebAppToken    string `orm:"size(64)"` // токен для входа
 }
 
 func init() {

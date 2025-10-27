@@ -63,6 +63,28 @@ func startTelegramPolling() {
 		}
 
 		handleMessage(update.Message)
+		if update.CallbackQuery != nil {
+			handleCallbackQuery(update.CallbackQuery)
+		}
+	}
+}
+func handleCallbackQuery(callback *tgbotapi.CallbackQuery) {
+	if strings.HasPrefix(callback.Data, "complete_") {
+		parts := strings.Split(callback.Data, "_")
+		if len(parts) == 3 {
+			hostID, _ := strconv.ParseInt(parts[1], 10, 64)
+			dealID, _ := strconv.ParseInt(parts[2], 10, 64)
+
+			// Удаляем кнопку сразу
+			edit := tgbotapi.NewEditMessageReplyMarkup(
+				callback.Message.Chat.ID,
+				callback.Message.MessageID,
+				tgbotapi.InlineKeyboardMarkup{InlineKeyboard: [][]tgbotapi.InlineKeyboardButton{}},
+			)
+			Bot.Send(edit)
+
+			go completePayment(hostID, dealID, callback.Message.Chat.ID)
+		}
 	}
 }
 
