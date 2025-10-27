@@ -52,10 +52,12 @@ func (c *UserController) Post() {
 	}
 
 	user := models.User{
-		FullName: fullname,
-		Username: username,
-		Password: models.HashPassword(password),
-		Role:     role,
+		FullName:       fullname,
+		Username:       username,
+		Password:       models.HashPassword(password),
+		TelegramChatID: 0,
+		WebAppToken:    "0",
+		Role:           role,
 	}
 	_, err := o.Insert(&user)
 	if err != nil {
