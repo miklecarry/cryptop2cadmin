@@ -155,6 +155,7 @@ func processDeal(host models.Host, deal DealPreview) {
 
 	// Логируем
 	o := orm.NewOrm()
+
 	hostLog := models.HostLog{
 		Host:  &host,
 		Level: "bounty",
@@ -163,6 +164,19 @@ func processDeal(host models.Host, deal DealPreview) {
 	}
 	if _, err := o.Insert(&hostLog); err != nil {
 		log.Printf("Хост %d: HostLog insert error: %v", host.Id, err)
+	}
+	var hosts []models.Host
+
+	_, err = o.QueryTable("host").
+		Filter("Active", true).
+		Filter("Priority", true).
+		All(&hosts)
+	if err != nil {
+		log.Printf("Хост %d: HostLog insert error: %v", host.Id, err)
+	}
+	if len(hosts) > 0 && host.Timeout > 0 {
+		host.StopTime = time.Now().Add(time.Duration(host.Timeout))
+		o.Update(&host)
 	}
 }
 
