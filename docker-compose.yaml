@@ -4,11 +4,13 @@ services:
   beegoapp:
     build:
       context: .
-      target: prod   # production target из Dockerfile
+#      target: prod   # production target из Dockerfile
     container_name: beegoapp
     env_file:
       - .env        # все переменные окружения из .env
     restart: always
+    volumes:
+      - beegoapp_data:/app/data
     networks:
       - web
     labels:
@@ -18,8 +20,6 @@ services:
     image: caddy:2
     container_name: caddy
     restart: always
-    env_file:
-      - .env   
     ports:
       - "443:443"
       - "80:80"
@@ -31,9 +31,6 @@ services:
       - web
 
 volumes:
+  beegoapp_data:
   caddy_data:
   caddy_config:
-
-networks:
-  web:
-    driver: bridge
