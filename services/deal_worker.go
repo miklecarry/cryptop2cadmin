@@ -175,7 +175,7 @@ func processDeal(host models.Host, deal DealPreview) {
 		log.Printf("Хост %d: HostLog insert error: %v", host.Id, err)
 	}
 	if len(hosts) > 0 && host.Timeout > 0 {
-		host.StopTime = time.Now().Add(time.Duration(host.Timeout))
+		host.StopTime = time.Now().Add(time.Second * time.Duration(host.Timeout))
 		o.Update(&host)
 	}
 }
