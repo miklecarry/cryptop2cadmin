@@ -83,7 +83,6 @@ func checkAllHosts() {
 	// Получаем все активные хосты с пользователями
 	_, err := o.QueryTable("host").
 		Filter("Active", true).
-		Filter("WorkerRunning", true).
 		RelatedSel("User").
 		All(&hosts)
 
