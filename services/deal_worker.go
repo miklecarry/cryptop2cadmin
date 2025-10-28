@@ -24,7 +24,7 @@ var (
 type DealWorker struct {
 	Host        models.Host
 	LastCursor  string
-	ActiveDeals map[int64]int      // dealID → messageID (int) — changed from string
+	ActiveDeals map[int64]int      // dealID → messageID
 	seen        map[int64]struct{} // локальный набор уже отправленных сделок
 	mu          sync.Mutex         // защита для полей воркера
 	cancel      context.CancelFunc
@@ -46,11 +46,6 @@ func StartDealWorker(host models.Host) {
 	}
 	workers[host.Id] = w
 
-	// Очистка сообщений (делаем это потокобезопасно)
-	if host.User != nil && host.User.TelegramChatID != 0 {
-		w.ClearUserMessages(host.User.TelegramChatID)
-	}
-
 	go w.run(ctx)
 }
 
@@ -68,9 +63,11 @@ func (w *DealWorker) run(ctx context.Context) {
 		}
 	}
 }
+
 func (w *DealWorker) stop() {
 	w.cancel()
 }
+
 func StopDealWorker(hostID int64) {
 	workersMu.Lock()
 	defer workersMu.Unlock()
@@ -119,7 +116,6 @@ func (w *DealWorker) checkDeals() {
 
 	// Обновляем курсор потокобезопасно
 	w.mu.Lock()
-	// Если API возвращает курсор — обновляем. Дополнительно можно проверить, не пустой ли он.
 	if result.Cursor != "" {
 		w.LastCursor = result.Cursor
 	}
@@ -132,37 +128,33 @@ func (w *DealWorker) checkDeals() {
 	}
 	chatID := w.Host.User.TelegramChatID
 
-	currentIDs := make(map[int64]struct{})
-	for _, d := range result.Data {
-		currentIDs[d.ID] = struct{}{}
+	// 1. Создаем множество текущих активных сделок из ответа API
+	currentActiveDeals := make(map[int64]struct{})
+	for _, deal := range result.Data {
+		currentActiveDeals[deal.ID] = struct{}{}
 	}
 
-	// 1️⃣ Удаляем оплаченные (те, которые в ActiveDeals больше не возвращаются)
+	// 2. Удаляем из ActiveDeals сделки, которых нет в текущем ответе (завершенные)
 	w.mu.Lock()
-	for id, msgID := range w.ActiveDeals {
-		if _, stillActive := currentIDs[id]; !stillActive {
-			// сделка пропала — удалить из Telegram
-			msg := tgbotapi.NewDeleteMessage(chatID, msgID)
-			if _, err := Bot.Send(msg); err != nil {
-				log.Printf("Clear Telegram message %d failed: %v", msgID, err)
-			}
-			delete(w.ActiveDeals, id)
-			delete(w.seen, id) // можно забыть из seen, чтобы при новой идентичной сделке можно было заново отправить
+	for dealID := range w.ActiveDeals {
+		if _, stillActive := currentActiveDeals[dealID]; !stillActive {
+			// Сделка завершена - удаляем из ActiveDeals
+			delete(w.ActiveDeals, dealID)
+			log.Printf("Сделка %d завершена, удалена из ActiveDeals", dealID)
 		}
 	}
 	w.mu.Unlock()
 
-	// 2️⃣ Добавляем новые
+	// 3. Добавляем новые сделки
 	for _, deal := range result.Data {
 		w.mu.Lock()
 		if _, exists := w.ActiveDeals[deal.ID]; exists {
 			w.mu.Unlock()
-			continue // уже отображается
+			continue // уже отображается в ActiveDeals
 		}
 		if _, wasSeen := w.seen[deal.ID]; wasSeen {
-			// уже однажды отправляли, пропускаем (защита от дубликатов API)
 			w.mu.Unlock()
-			continue
+			continue // уже была отправлена когда-то
 		}
 		w.mu.Unlock()
 
@@ -171,6 +163,8 @@ func (w *DealWorker) checkDeals() {
 			log.Printf("getDealDetails error for %d: %v", deal.ID, err)
 			continue
 		}
+
+		// Отправляем сообщение в формате старой реализации
 		msgID := w.sendTelegramMessage(chatID, details)
 		if msgID != 0 {
 			w.mu.Lock()
@@ -190,35 +184,6 @@ func (w *DealWorker) checkDeals() {
 		}
 	}
 }
-
-func ClearUserMessages(chatID int64, w *DealWorker) {
-	// Удобно иметь метод, но пусть он берёт w.mu
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	for _, msgID := range w.ActiveDeals {
-		msg := tgbotapi.NewDeleteMessage(chatID, msgID)
-		if _, err := Bot.Send(msg); err != nil {
-			log.Printf("ClearUserMessages: failed to delete %d: %v", msgID, err)
-		}
-	}
-	w.ActiveDeals = make(map[int64]int)
-	w.seen = make(map[int64]struct{})
-}
-
-func (w *DealWorker) ClearUserMessages(chatID int64) {
-	// метод-обёртка: потокобезопасно
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	for _, msgID := range w.ActiveDeals {
-		msg := tgbotapi.NewDeleteMessage(chatID, msgID)
-		if _, err := Bot.Send(msg); err != nil {
-			log.Printf("ClearUserMessages: failed to delete %d: %v", msgID, err)
-		}
-	}
-	w.ActiveDeals = make(map[int64]int)
-	w.seen = make(map[int64]struct{})
-}
-
 func (w *DealWorker) getDealDetails(dealID int64) (*DealDetails, error) {
 	url := fmt.Sprintf("https://app.cr.bot/internal/v1/p2c/payments/%d", dealID)
 	req, _ := http.NewRequest("GET", url, nil)
@@ -253,47 +218,48 @@ func (w *DealWorker) sendTelegramMessage(chatID int64, deal *DealDetails) int {
 		return 0
 	}
 
-	// Генерация QR-кода (если не удалось — просто продолжим без фото)
+	// Формат сообщения как в старой реализации
+	text := fmt.Sprintf("https://app.cr.bot/p2c/orders/%d\nСумма: %s %s\nМагазин: %s",
+		deal.ID, deal.InAmount, deal.InAsset, deal.BrandName)
+
+	// Генерация QR-кода
 	var photoFile tgbotapi.FileBytes
 	png, err := qrcode.Encode(deal.Url, qrcode.Medium, 256)
 	if err == nil {
 		photoFile = tgbotapi.FileBytes{
-			Name:  fmt.Sprintf("qr_%d.png", deal.ID),
+			Name:  fmt.Sprintf("qr%d.png", deal.ID),
 			Bytes: png,
 		}
 	}
 
-	// Текст для подписи (caption). Telegram captions ограничены — длину контролируйте сами.
-	caption := fmt.Sprintf(
-		"💳 <b>Новая сделка</b>\n"+
-			"https://app.cr.bot/p2c/orders/%d\n"+
-			"Сумма: %s %s\nМагазин: %s\n\n"+
-			"🔗 <a href=\"%s\">Ссылка на оплату</a>",
-		deal.ID, deal.InAmount, deal.InAsset, deal.BrandName, deal.Url)
-
-	callbackData := fmt.Sprintf("complete_%d_%d", w.Host.Id, deal.ID)
-	btn := tgbotapi.NewInlineKeyboardButtonData("✅ Оплатил", callbackData)
+	callbackData := fmt.Sprintf("%d", deal.ID)
+	btn := tgbotapi.NewInlineKeyboardButtonData("Оплатил", callbackData)
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(btn),
 	)
 
+	// Отправка с фото если QR сгенерировался
 	if len(photoFile.Bytes) > 0 {
 		photo := tgbotapi.NewPhoto(chatID, photoFile)
-		photo.Caption = caption
-		photo.ParseMode = "HTML"
-		photo.ReplyMarkup = keyboard
 		sent, err := Bot.Send(photo)
+
 		if err != nil {
 			log.Printf("sendTelegramMessage: send photo failed: %v", err)
-			return 0
+			// Продолжаем без фото
+		} else {
+			// После фото отправляем текст с кнопкой
+			msg := tgbotapi.NewMessage(chatID, text)
+			msg.ReplyMarkup = keyboard
+			if sentMsg, err := Bot.Send(msg); err == nil {
+				return sentMsg.MessageID
+			}
+			return sent.MessageID
 		}
-		return sent.MessageID
 	}
 
-	// Если фото не получилось — отправим обычное сообщение с кнопкой
-	msg := tgbotapi.NewMessage(chatID, caption)
+	// Если фото не получилось — отправляем просто текст с кнопкой
+	msg := tgbotapi.NewMessage(chatID, text)
 	msg.ReplyMarkup = keyboard
-	msg.ParseMode = "HTML"
 
 	sent, err := Bot.Send(msg)
 	if err != nil {

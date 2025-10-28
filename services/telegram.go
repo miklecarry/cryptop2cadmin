@@ -113,7 +113,7 @@ func handleMessage(msg *tgbotapi.Message) {
 	chatID := msg.Chat.ID
 	text := strings.TrimSpace(msg.Text)
 
-	// Обработка команды /start — делаем под мьютексом коротко
+	// Обработка команды /start
 	if text == "/start" {
 		mu.Lock()
 		authStates[chatID] = &AuthState{Step: "awaiting_login"}
@@ -133,7 +133,7 @@ func handleMessage(msg *tgbotapi.Message) {
 		}
 	}
 
-	// Получаем состояние под мьютексом (но не держим мьютекс во время DB операций)
+	// Получаем состояние
 	mu.Lock()
 	state, exists := authStates[chatID]
 	mu.Unlock()
@@ -145,7 +145,6 @@ func handleMessage(msg *tgbotapi.Message) {
 
 	switch state.Step {
 	case "awaiting_login":
-		// Сохраняем логин (под мьютексом коротко)
 		mu.Lock()
 		state.Login = text
 		state.Step = "awaiting_password"
@@ -154,16 +153,14 @@ func handleMessage(msg *tgbotapi.Message) {
 		sendMessage(chatID, "Введите ваш пароль:")
 
 	case "awaiting_password":
-		// Снимаем состояние под мьютексом, чтобы не блокировать других
 		mu.Lock()
 		login := state.Login
-		// удаляем состояние до проверки, чтобы избежать дублей
 		delete(authStates, chatID)
 		mu.Unlock()
 
 		password := text
 
-		// Проверка учётных данных — это IO, делаем без глобального мьютекса
+		// Проверка учётных данных
 		o := orm.NewOrm()
 		var user models.User
 		err := o.QueryTable("user").Filter("Username", login).One(&user)
@@ -172,11 +169,15 @@ func handleMessage(msg *tgbotapi.Message) {
 			return
 		}
 
-		// Обновляем пользователя: привязываем chat_id и генерируем токен
+		// ВСЕГДА обновляем chatID пользователя
 		user.TelegramChatID = chatID
 		user.WebAppToken = utils.GenerateToken()
+
+		// Обновляем все необходимые поля
 		if _, err := o.Update(&user, "TelegramChatID", "WebAppToken"); err != nil {
 			log.Printf("Update user error: %v", err)
+			sendMessage(chatID, "❌ Ошибка обновления данных.")
+			return
 		}
 
 		// Формируем Web App URL
@@ -191,7 +192,7 @@ func handleMessage(msg *tgbotapi.Message) {
 		msg := tgbotapi.NewMessage(chatID, "Авторизация успешна!")
 		msg.ReplyMarkup = keyboard
 		if sentMsg, err := Bot.Send(msg); err == nil {
-			// Пинning сообщения — это отдельный Request
+			// Пинним сообщение
 			pin := tgbotapi.PinChatMessageConfig{
 				ChatID:              chatID,
 				MessageID:           sentMsg.MessageID,

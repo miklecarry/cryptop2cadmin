@@ -18,6 +18,8 @@ services:
     image: caddy:2
     container_name: caddy
     restart: always
+    env_file:
+      - .env   
     ports:
       - "443:443"
       - "80:80"

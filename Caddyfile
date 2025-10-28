@@ -1,4 +1,4 @@
-yourdomain.com {
+{$WEB_APP_URL} {
     # Авто HTTPS
     encode gzip
     log {
