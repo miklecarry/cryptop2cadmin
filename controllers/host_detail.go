@@ -125,10 +125,7 @@ func (c *HostDetailController) Update() {
 		if max, err := c.GetInt("max_limit"); err == nil {
 			host.MaxLimit = max
 		}
-		if !host.Active {
-			services.StopDealWorker(host.Id)
 
-		}
 		o.Update(&host)
 		c.Redirect("/host/"+id, 302)
 		return
@@ -159,10 +156,7 @@ func (c *HostDetailController) Update() {
 	host.ServerAddr = c.GetString("server_addr")
 	host.SocketURL = c.GetString("socket_url")
 	host.AccessToken = c.GetString("access_token")
-	if !host.Active {
-		services.StopDealWorker(host.Id)
 
-	}
 	host.Priority = c.GetString("priority") == "on"
 
 	if min, err := c.GetInt("min_limit"); err == nil {

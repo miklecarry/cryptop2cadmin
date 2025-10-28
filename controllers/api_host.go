@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"hostmanager/models"
-	"hostmanager/services"
 
 	"github.com/beego/beego/v2/client/orm"
 	"github.com/beego/beego/v2/server/web"
@@ -146,9 +145,6 @@ func (c *APIHostController) SelectPaymentMethod() {
 	host.WorkerRunning = true
 	o.Update(&host, "PaymentMethodID", "WorkerRunning")
 
-	// Запуск воркера (если ещё не запущен)
-	services.StartDealWorker(host)
-
 	c.Data["json"] = map[string]string{"status": "ok"}
 	c.ServeJSON()
 
@@ -197,37 +193,34 @@ func (c *APIHostController) StartMonitoring() {
 	}
 	resp.Body.Close()
 
-	// Сохраняем
+	// Сохраняем настройки - воркер запустится автоматически через глобальный мониторинг
 	host.Active = true
 	host.PaymentMethodID = methodID
 	host.WorkerRunning = true
 	o.Update(&host, "Active", "PaymentMethodID", "WorkerRunning")
 
-	// Запускаем воркер
-	services.StartDealWorker(host)
-
 	// Лог
 	log := models.HostLog{
 		Host:    &host,
 		Level:   "info",
-		Message: fmt.Sprintf("Бот стартанул с id метода %s", methodID),
+		Message: fmt.Sprintf("Мониторинг запущен с id метода %s", methodID),
 	}
 	o.Insert(&log)
 
 	c.Data["json"] = map[string]string{"status": "ok"}
 	c.ServeJSON()
 }
+
 func (c *APIHostController) StopMonitoring() {
 	id := c.Ctx.Input.Param(":id")
 	o := orm.NewOrm()
 	var host models.Host
 	o.QueryTable("host").Filter("Id", id).One(&host)
 
+	// Только меняем флаги - глобальный мониторинг сам остановит воркер
 	host.Active = false
 	host.WorkerRunning = false
 	o.Update(&host, "Active", "WorkerRunning")
-
-	services.StopDealWorker(host.Id)
 
 	c.Data["json"] = map[string]string{"status": "ok"}
 	c.ServeJSON()

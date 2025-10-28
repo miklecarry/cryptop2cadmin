@@ -42,7 +42,7 @@ func InitTelegramBot() {
 
 	Bot.Debug = false
 	log.Printf("Авторизован в Telegram как @%s", Bot.Self.UserName)
-
+	go StartSimpleMonitoring()
 	// Запуск в отдельной горутине
 	go startTelegramPolling()
 }
@@ -90,17 +90,6 @@ func handleCallbackQuery(callback *tgbotapi.CallbackQuery) {
 			hostID, _ := strconv.ParseInt(parts[1], 10, 64)
 			dealID, _ := strconv.ParseInt(parts[2], 10, 64)
 
-			// Удаляем клавиатуру (заменяем на пустую)
-			edit := tgbotapi.NewEditMessageReplyMarkup(
-				callback.Message.Chat.ID,
-				callback.Message.MessageID,
-				tgbotapi.InlineKeyboardMarkup{InlineKeyboard: [][]tgbotapi.InlineKeyboardButton{}},
-			)
-			if _, err := Bot.Send(edit); err != nil {
-				log.Printf("EditMessageReplyMarkup error: %v", err)
-			}
-
-			// Выполняем подтверждение платежа асинхронно
 			go completePayment(hostID, dealID, callback.Message.Chat.ID)
 		}
 	}
@@ -231,7 +220,7 @@ func completePayment(hostID, dealID int64, chatID int64) {
 	}
 	if resp != nil {
 		resp.Body.Close()
-		if resp.StatusCode != 200 && resp.StatusCode != 204 {
+		if resp.StatusCode != 200 {
 			log.Printf("completePayment: unexpected status %d", resp.StatusCode)
 			// можно распарсить тело и показать пользователю причину
 			sendMessage(chatID, "❌ Ошибка от сервера при подтверждении сделки.")
