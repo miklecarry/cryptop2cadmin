@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"hostmanager/models"
 	"hostmanager/utils"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -223,7 +224,10 @@ func completePayment(hostID, dealID int64, chatID int64) {
 	}
 	req, _ := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
 	req.Header.Set("Cookie", "access_token="+host.AccessToken)
-
+	req.Header.Set("Origin", "https://app.cr.bot")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Referer", fmt.Sprintf("https://app.cr.bot/p2c/orders/%s", dealID))
+	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36")
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -236,7 +240,8 @@ func completePayment(hostID, dealID int64, chatID int64) {
 		if resp.StatusCode != 200 {
 			log.Printf("completePayment: unexpected status %d", resp.StatusCode)
 			// можно распарсить тело и показать пользователю причину
-			sendMessage(chatID, "❌ Ошибка от сервера при подтверждении сделки.")
+			buf, _ := io.ReadAll(resp.Body)
+			sendMessage(chatID, fmt.Sprintf("❌ Ошибка от сервера при подтверждении сделки. %s", string(buf)))
 			return
 		}
 	}
