@@ -1,6 +1,8 @@
 package services
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"hostmanager/models"
 	"hostmanager/utils"
@@ -206,9 +208,20 @@ func completePayment(hostID, dealID int64, chatID int64) {
 		sendMessage(chatID, "❌ Воркер хоста не найден.")
 		return
 	}
-
+	if host.PaymentMethodID == "" {
+		log.Printf("completePayment: payment method not set for host %d", hostID)
+		sendMessage(chatID, "❌ Метод оплаты не настроен.")
+		return
+	}
 	url := fmt.Sprintf("https://app.cr.bot/internal/v1/p2c/payments/%d/complete", dealID)
-	req, _ := http.NewRequest("POST", url, nil)
+	payload := map[string]string{"method": host.PaymentMethodID}
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("completePayment: json marshal error: %v", err)
+		sendMessage(chatID, "❌ Ошибка при формировании запроса.")
+		return
+	}
+	req, _ := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
 	req.Header.Set("Cookie", "access_token="+host.AccessToken)
 
 	client := &http.Client{Timeout: 5 * time.Second}

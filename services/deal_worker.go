@@ -210,7 +210,7 @@ func sendTelegramDealMessage(chatID int64, deal *DealDetails, hostID int64) {
 		}
 	}
 
-	callbackData := fmt.Sprintf("%d", deal.ID)
+	callbackData := fmt.Sprintf("complete_%d_%d", hostID, deal.ID)
 	btn := tgbotapi.NewInlineKeyboardButtonData("Оплатил", callbackData)
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(btn),
