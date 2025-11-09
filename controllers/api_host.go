@@ -3,6 +3,7 @@ package controllers
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 
@@ -45,7 +46,6 @@ func (c *APIHostController) Get() {
 	}
 
 	o := orm.NewOrm()
-	// Найдём пользователя по username
 	user := models.User{Username: username}
 	err := o.Read(&user, "Username")
 	if err == orm.ErrNoRows {
@@ -60,6 +60,7 @@ func (c *APIHostController) Get() {
 		return
 	}
 
+	// Замените HashPassword на вашу реальную функцию
 	if user.Password != models.HashPassword(password) {
 		c.Ctx.Output.SetStatus(http.StatusUnauthorized)
 		c.Data["json"] = map[string]interface{}{"status": "unauthorized"}
@@ -82,10 +83,25 @@ func (c *APIHostController) Get() {
 		return
 	}
 
+	clientIP := c.Ctx.Input.IP()
+	// Получаем токен для IP-адреса клиента
+	tokenForIP, err := host.GetTokenForIP(clientIP)
+	if err != nil {
+
+		fmt.Printf("Error getting token for IP %s on host %d: %v\n", clientIP, host.Id, err)
+
+		tokenForIP = host.AccessToken
+	}
+
+	if tokenForIP == "" {
+		tokenForIP = host.AccessToken
+	}
+
+	// Формируем ответ
 	resp := remoteConfigResponse{
 		Active:      host.Active,
 		SocketURL:   host.SocketURL,
-		AccessToken: host.AccessToken,
+		AccessToken: tokenForIP,
 		MinAmount:   host.MinLimit,
 		MaxAmount:   host.MaxLimit,
 		StopTime:    host.StopTime,
@@ -221,6 +237,75 @@ func (c *APIHostController) StopMonitoring() {
 	host.Active = false
 	host.WorkerRunning = false
 	o.Update(&host, "Active", "WorkerRunning")
+
+	c.Data["json"] = map[string]string{"status": "ok"}
+	c.ServeJSON()
+}
+
+func (c *APIHostController) UpdateTokens() {
+	id := c.Ctx.Input.Param(":id")
+
+	o := orm.NewOrm()
+	var host models.Host
+	err := o.QueryTable("host").Filter("Id", id).One(&host)
+	if err != nil {
+		c.Ctx.Output.SetStatus(http.StatusNotFound)
+		c.Data["json"] = map[string]string{"error": "Host not found"}
+		c.ServeJSON()
+		return
+	}
+
+	// Читаем тело запроса как байты для отладки
+	bodyBytes, err := io.ReadAll(c.Ctx.Input.Context.Request.Body)
+	if err != nil {
+		fmt.Printf("Error reading request body: %v\n", err)
+		c.Ctx.Output.SetStatus(http.StatusBadRequest)
+		c.Data["json"] = map[string]string{"error": "Failed to read request body"}
+		c.ServeJSON()
+		return
+	}
+
+	// Пытаемся распарсить JSON
+	var newTokensMap map[string]string
+	err = json.Unmarshal(bodyBytes, &newTokensMap)
+	if err != nil {
+		fmt.Printf("Error unmarshaling JSON: %v\n", err)
+		// Логируем тип полученных данных (если возможно)
+		fmt.Printf("Raw body bytes: %v\n", bodyBytes)
+		c.Ctx.Output.SetStatus(http.StatusBadRequest)
+		c.Data["json"] = map[string]string{"error": fmt.Sprintf("Invalid JSON format: %v", err)}
+		c.ServeJSON()
+		return
+	}
+
+	// Проверим, действительно ли это мапа (объект)
+	if newTokensMap == nil {
+		newTokensMap = make(map[string]string) // Инициализируем пустую мапу, если пришёл null
+	}
+
+	// --- Остальная логика сохранения ---
+	// Обновляем мапу в модели
+	host.HostsAPITokensJSON = "{}" // Инициализируем, если пусто
+	for ip, token := range newTokensMap {
+		err = host.SetTokenForIP(ip, token)
+		if err != nil {
+			fmt.Printf("Error setting token for IP %s on host %d: %v\n", ip, host.Id, err)
+			c.Ctx.Output.SetStatus(http.StatusInternalServerError)
+			c.Data["json"] = map[string]string{"error": fmt.Sprintf("Failed to set token for IP %s", ip)}
+			c.ServeJSON()
+			return
+		}
+	}
+
+	// Сохраняем изменения в БД
+	_, err = o.Update(&host, "HostsAPITokensJSON")
+	if err != nil {
+		fmt.Printf("Error saving tokens map to DB for host %d: %v\n", host.Id, err)
+		c.Ctx.Output.SetStatus(http.StatusInternalServerError)
+		c.Data["json"] = map[string]string{"error": "Failed to save tokens to database"}
+		c.ServeJSON()
+		return
+	}
 
 	c.Data["json"] = map[string]string{"status": "ok"}
 	c.ServeJSON()

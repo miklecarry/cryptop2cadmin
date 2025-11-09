@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"fmt"
 	"hostmanager/models"
 	"hostmanager/services"
 
@@ -59,11 +60,16 @@ func (c *HostDetailController) Get() {
 	// Логи
 	var logs []models.HostLog
 	o.QueryTable("host_log").Filter("Host__Id", host.Id).OrderBy("-Id").Limit(100).All(&logs)
-
+	tokensMap, err := host.GetFullTokensMap()
+	if err != nil {
+		// Логируем ошибку, но не прерываем отображение
+		fmt.Printf("Error getting tokens map for host %s: %v\n", host.Name, err)
+		tokensMap = make(map[string]string) // Используем пустой мап
+	}
 	c.Data["Host"] = host
 	c.Data["Role"] = role
 	c.Data["Logs"] = logs
-
+	c.Data["HostTokens"] = tokensMap
 	// Только админы видят список пользователей
 	if role == "admin" || role == "superadmin" {
 		var users []models.User

@@ -58,7 +58,36 @@
         Используется для авторизации запросов к app.cr.bot
     </div>
 </div>
+    <h5 class="mt-4">Управление API-токенами для IP-адресов</h5>
+    <p class="text-muted small">Если для IP-адреса задан токен, он будет передаваться хосту вместо общего 'Access Token'. Если токен пустой, используется общий 'Access Token'.</p>
 
+    <!-- Таблица существующих IP-токенов -->
+    <div class="mb-3">
+        <label class="form-label">Назначенные токены</label>
+        <div id="tokensListContainer">
+            {{if .HostTokens}}
+                {{range $ip, $token := .HostTokens}}
+                    <div class="d-flex mb-2 align-items-center" data-ip="{{ $ip }}">
+                        <input type="text" class="form-control me-2 ip-input" value="{{ $ip }}" readonly style="flex: 1;">
+                        <input type="text" class="form-control me-2 token-input" value="{{ $token }}" placeholder="API Token" style="flex: 2;">
+                        <button type="button" class="btn btn-outline-danger btn-sm delete-token-btn" data-ip="{{ $ip }}">Удалить</button>
+                    </div>
+                {{end}}
+            {{else}}
+                <p class="text-muted">Токены для IP-адресов не назначены.</p>
+            {{end}}
+        </div>
+    </div>
+
+    <!-- Форма для добавления нового IP-токена -->
+    <div class="mb-3">
+        <label class="form-label">Добавить/обновить токен для IP</label>
+        <div class="d-flex">
+            <input type="text" id="newIPInput" class="form-control me-2" placeholder="IP-адрес (например, 192.168.1.100)">
+            <input type="text" id="newTokenInput" class="form-control me-2" placeholder="API Token">
+            <button type="button" id="addTokenBtn" class="btn btn-outline-primary">Добавить/Обновить</button>
+        </div>
+    </div>
 {{if or (eq .Role "admin") (eq .Role "superadmin")}}
     <!-- Настройки задержек (только для админов) -->
     <h5 class="mt-4">Настройки задержек</h5>
@@ -138,7 +167,158 @@ document.addEventListener("DOMContentLoaded", () => {
     // Получаем host id из шаблона (вставьте в шаблон data-host-id="{{.Host.Id}}")
     // Если у вас уже есть способ доступиться к Id на странице — используйте его.
     const hostId = '{{.Host.Id}}';
+    async function saveTokens() {
+        const tokensContainer = document.getElementById('tokensListContainer');
+        const tokenInputs = tokensContainer.querySelectorAll('.token-input');
+        const newTokensMap = {};
 
+        tokenInputs.forEach(input => {
+            const ipDiv = input.closest('[data-ip]');
+            if (ipDiv) {
+                const ip = ipDiv.getAttribute('data-ip');
+                const token = input.value.trim(); // Убираем лишние пробелы
+                newTokensMap[ip] = token;
+            }
+        });
+
+        try {
+            // Отправляем JSON-объект с новым мапом токенов
+            const res = await fetch(`/api/host/${encodeURIComponent(hostId)}/update-tokens`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(newTokensMap),
+            });
+
+            if (!res.ok) {
+                const errorData = await res.json().catch(() => ({ error: 'Неизвестная ошибка' }));
+                throw new Error(errorData.error || `HTTP error! status: ${res.status}`);
+            }
+
+            const data = await res.json();
+            if (data.status === 'ok') {
+                // console.log('Токены успешно обновлены');
+                // Можно показать сообщение об успехе
+            } else {
+                throw new Error(data.error || 'Неизвестная ошибка при сохранении');
+            }
+        } catch (err) {
+            console.error('Ошибка при сохранении токенов:', err);
+            alert('Ошибка при сохранении токенов: ' + err.message);
+        }
+    }
+
+    // Обработчик кнопки "Добавить/Обновить"
+    document.getElementById('addTokenBtn').addEventListener('click', () => {
+        const ipInput = document.getElementById('newIPInput');
+        const tokenInput = document.getElementById('newTokenInput');
+        const ip = ipInput.value.trim();
+        const token = tokenInput.value.trim();
+
+        if (!ip) {
+            alert('Пожалуйста, введите IP-адрес.');
+            return;
+        }
+
+        const ipRegex = /^(\d{1,3}\.){3}\d{1,3}$/;
+        if (!ipRegex.test(ip)) {
+            alert('Неверный формат IP-адреса.');
+            return;
+        }
+
+        const tokensContainer = document.getElementById('tokensListContainer');
+        const existingDiv = tokensContainer.querySelector(`[data-ip="${ip}"]`);
+
+        if (existingDiv) {
+            existingDiv.querySelector('.token-input').value = token;
+        } else {
+            const newDiv = document.createElement('div');
+            newDiv.className = 'd-flex mb-2 align-items-center';
+            // --- КРИТИЧЕСКОЕ ИЗМЕНЕНИЕ: Атрибут data-ip добавляется КОНТЕЙНЕРНОМУ DIV ---
+            newDiv.setAttribute('data-ip', ip);
+            // Кнопка НЕ должна иметь data-ip
+            newDiv.innerHTML = `
+                <input type="text" class="form-control me-2 ip-input" value="${escapeHtml(ip)}" readonly style="flex: 1;">
+                <input type="text" class="form-control me-2 token-input" value="${escapeHtml(token)}" placeholder="API Token" style="flex: 2;">
+                <button type="button" class="btn btn-outline-danger btn-sm delete-token-btn">Удалить</button>
+            `;
+            tokensContainer.appendChild(newDiv);
+        }
+
+        ipInput.value = '';
+        tokenInput.value = '';
+
+        saveTokens();
+    });
+
+    // Делегирование события клика для кнопок "Удалить"
+    document.getElementById('tokensListContainer').addEventListener('click', (e) => {
+        if (e.target.classList.contains('delete-token-btn')) {
+            const divToRemove = e.target.closest('[data-ip]');
+
+            if (divToRemove) {
+                const ipToRemove = divToRemove.getAttribute('data-ip');
+
+                if (confirm(`Вы уверены, что хотите удалить токен для IP ${ipToRemove}?`)) {
+                    // Формируем новую мапу, исключая удаляемый IP
+                    const tokensContainer = document.getElementById('tokensListContainer');
+                    const tokenDivs = tokensContainer.querySelectorAll('[data-ip]');
+                    const newTokensMap = {};
+
+                    tokenDivs.forEach(div => {
+                        const ip = div.getAttribute('data-ip');
+                        // Пропускаем div с IP, который нужно удалить
+                        if (ip !== ipToRemove) {
+                            const tokenInput = div.querySelector('.token-input');
+                            if (tokenInput) {
+                                const token = tokenInput.value.trim();
+                                newTokensMap[ip] = token;
+                            }
+                        }
+                    });
+
+                    // Отправляем обновлённый JSON без удаляемого IP
+                    fetch(`/api/host/${encodeURIComponent(hostId)}/update-tokens`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify(newTokensMap),
+                    })
+                    .then(res => {
+                        if (!res.ok) {
+                            return res.json().then(errorData => {
+                                const errorMessage = errorData.error || `HTTP error! status: ${res.status}`;
+                                throw new Error(errorMessage);
+                            });
+                        }
+                        return res.json();
+                    })
+                    .then(data => {
+                        if (data.status === 'ok') {
+                            window.location.reload();
+                        } else {
+                            throw new Error(data.error || 'Неизвестная ошибка при сохранении');
+                        }
+                    })
+                    .catch(err => {
+                        console.error('Ошибка при удалении токена:', err);
+                        alert('Ошибка при удалении токена: ' + err.message);
+                    });
+                }
+            }
+        }
+    });
+
+    // Обработчик изменения токена вручную (для уже существующих записей)
+    document.getElementById('tokensListContainer').addEventListener('change', (e) => {
+        if (e.target.classList.contains('token-input')) {
+            // Сохраняем изменения при изменении любого токена
+            // Для производительности можно добавить debounce
+            saveTokens();
+        }
+    });
     // Если вы не хотите в шаблоне вставлять hostId как JS-переменную,
     // можно прочитать его из ссылки "Удалить" или других data-атрибутов.
     // Убедитесь, что template заменяет {{.Host.Id}} корректно.

@@ -26,5 +26,6 @@ func init() {
 	web.Router("/api/host/:id/start-monitoring", &controllers.APIHostController{}, "post:StartMonitoring")
 	web.Router("/api/host/:id/stop-monitoring", &controllers.APIHostController{}, "post:StopMonitoring")
 	web.Router("/api/host/state", &controllers.APIHostController{})
+	web.Router("/api/host/:id/update-tokens", &controllers.APIHostController{}, "post:UpdateTokens")
 
 }
