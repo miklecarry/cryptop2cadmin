@@ -51,6 +51,8 @@ func (h *Host) GetTokenForIP(ip string) (string, error) {
 			return "", err // Ошибка маршаллинга
 		}
 		h.HostsAPITokensJSON = string(updatedJSON)
+		o := orm.NewOrm()
+		o.Update(h)
 		// Возвращаем пустой токен, внешний код решит, что с ним делать
 		return "", nil
 	}
